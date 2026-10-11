@@ -16,29 +16,43 @@ Aturan:
 - notes: detail tambahan (link, nama dosen, catatan). null kalau tidak ada.`;
 }
 
-/** Gemini (gratis, ada batas pemakaian). Dipakai kalau GEMINI_API_KEY diisi. */
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Gemini (gratis, ada batas pemakaian). Dipakai kalau GEMINI_API_KEY diisi.
+ *  Kalau server Google sibuk (429/503), coba ulang sampai 3 kali. */
 async function askGemini(text: string): Promise<string> {
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-    {
-      method: "POST",
-      headers: {
-        "x-goog-api-key": process.env.GEMINI_API_KEY ?? "",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: systemPrompt() }] },
-        contents: [{ role: "user", parts: [{ text }] }],
-        generationConfig: { responseMimeType: "application/json", maxOutputTokens: 1024 },
-      }),
+  const model = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+  const body = JSON.stringify({
+    systemInstruction: { parts: [{ text: systemPrompt() }] },
+    contents: [{ role: "user", parts: [{ text }] }],
+    generationConfig: { responseMimeType: "application/json", maxOutputTokens: 1024 },
+  });
+
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "x-goog-api-key": process.env.GEMINI_API_KEY ?? "",
+          "Content-Type": "application/json",
+        },
+        body,
+      }
+    );
+
+    if ((res.status === 429 || res.status === 503) && attempt < 3) {
+      console.warn(`Gemini sibuk (${res.status}), coba lagi ke-${attempt + 1}`);
+      await sleep(attempt * 1500);
+      continue;
     }
-  );
-  if (!res.ok) throw new Error(`Gemini API ${res.status}: ${await res.text()}`);
-  const data = (await res.json()) as {
-    candidates?: { content?: { parts?: { text?: string }[] } }[];
-  };
-  return (data.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? "").join("");
+    if (!res.ok) throw new Error(`Gemini API ${res.status}: ${await res.text()}`);
+
+    const data = (await res.json()) as {
+      candidates?: { content?: { parts?: { text?: string }[] } }[];
+    };
+    return (data.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? "").join("");
+  }
 }
 
 /** Claude (berbayar, butuh saldo API di console.anthropic.com) */
