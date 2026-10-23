@@ -3,9 +3,11 @@ import { completeTask, createTask, listOpenTasks } from "@/lib/google-tasks";
 import { parseTask } from "@/lib/parse-task";
 import { allTasks, dailyDigest } from "@/lib/digest";
 import { esc, sendMessage, tg } from "@/lib/telegram";
-import { prettyDate } from "@/lib/date";
+import { prettyDate, todayWIB } from "@/lib/date";
+import { getDay, getStreak, setStatus } from "@/lib/quest-engine";
+import { renderQuests } from "@/lib/quest-bot";
 
-type InlineKeyboard = { text: string; callback_data?: string }[][];
+type InlineKeyboard = { text: string; callback_data?: string; web_app?: { url: string } }[][];
 
 type Update = {
   message?: { chat: { id: number }; text?: string };
@@ -23,7 +25,8 @@ const HELP = `Kirim tugas dengan bahasa biasa, contoh:
 
 Perintah:
 /hari_ini – yang terlambat, hari ini, dan 7 hari ke depan
-/tugas – semua tugas terbuka`;
+/tugas – semua tugas terbuka
+/quest – daily quest hari ini`;
 
 const isAllowed = (chatId: number) => String(chatId) === process.env.TELEGRAM_ALLOWED_CHAT_ID;
 
@@ -68,6 +71,7 @@ async function onMessage(msg: NonNullable<Update["message"]>) {
     const r = allTasks(await listOpenTasks());
     return void (await sendMessage(chatId, r.text, { reply_markup: r.reply_markup }));
   }
+  if (command === "/quest") return void (await sendQuests(chatId));
   if (command) return void (await sendMessage(chatId, `Perintah nggak dikenal.\n\n${HELP}`));
 
   const task = await parseTask(text);
@@ -80,7 +84,12 @@ async function onMessage(msg: NonNullable<Update["message"]>) {
 }
 
 async function onButton(cb: NonNullable<Update["callback_query"]>) {
-  if (!isAllowed(cb.from.id) || !cb.data?.startsWith("done:") || !cb.message) {
+  if (!isAllowed(cb.from.id) || !cb.message) {
+    await tg("answerCallbackQuery", { callback_query_id: cb.id });
+    return;
+  }
+  if (cb.data?.startsWith("q:")) return void (await onQuestButton(cb));
+  if (!cb.data?.startsWith("done:")) {
     await tg("answerCallbackQuery", { callback_query_id: cb.id });
     return;
   }
@@ -96,5 +105,37 @@ async function onButton(cb: NonNullable<Update["callback_query"]>) {
     chat_id: cb.message.chat.id,
     message_id: cb.message.message_id,
     reply_markup: { inline_keyboard: rows },
+  });
+}
+
+async function sendQuests(chatId: number) {
+  const today = todayWIB();
+  const [day, streak] = await Promise.all([getDay(today), getStreak(today)]);
+  const r = renderQuests(day, streak);
+  await sendMessage(chatId, r.text, { reply_markup: r.reply_markup });
+}
+
+/** Tombol "q:<tanggal>:<id>" → tandai quest selesai, lalu perbarui pesan yang sama */
+async function onQuestButton(cb: NonNullable<Update["callback_query"]>) {
+  const [, date, id] = (cb.data ?? "").split(":");
+  const msg = cb.message!;
+  let notice = "";
+  try {
+    const r = await setStatus(date, id, "done");
+    notice = r.xpDelta ? `+${r.xpDelta} XP` : "Sudah selesai";
+    if (r.levelUp) notice += ` · LEVEL UP! Lv ${r.levelUp}`;
+  } catch (err) {
+    notice = String(err instanceof Error ? err.message : err).slice(0, 180);
+  }
+  await tg("answerCallbackQuery", { callback_query_id: cb.id, text: notice });
+
+  const [day, streak] = await Promise.all([getDay(date), getStreak(todayWIB())]);
+  const r = renderQuests(day, streak);
+  await tg("editMessageText", {
+    chat_id: msg.chat.id,
+    message_id: msg.message_id,
+    text: r.text,
+    parse_mode: "HTML",
+    reply_markup: r.reply_markup ?? { inline_keyboard: [] },
   });
 }

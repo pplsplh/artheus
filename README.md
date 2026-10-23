@@ -8,6 +8,7 @@ Kirim tugas ke bot Telegram dengan bahasa biasa → Claude membaca judul dan dea
 - `/tugas` → semua tugas terbuka
 - Tombol ✅ → tandai selesai di Google Tasks
 - Hanya merespons chat ID-mu
+- **Quest Log**: daily quest bergaya RPG (Mini App di dalam Telegram) dengan XP, level, rank, stat, streak, dan perisai
 
 ## Setup
 
@@ -58,8 +59,40 @@ Harus muncul `"ok":true`.
 2. Isi `TELEGRAM_ALLOWED_CHAT_ID` di Vercel → **Redeploy**.
 3. Coba kirim: `revisi Bab 2 besok`.
 
+## Quest Log (daily quest RPG)
+
+Rutinitas harian jadi quest. Selesai → dapat XP ke stat terkait (STR, AGI, INT, VIT, SEN), naik level dan rank (E → S). Tugas Google Tasks yang deadline-nya dekat muncul sebagai **side quest** di halaman yang sama.
+
+**Aturan:**
+- Hari dianggap **aman** kalau minimal 60% quest hari itu selesai. Hari aman berturut-turut = streak.
+- Hari ini yang belum aman tidak memutus streak (masih berjalan).
+- **Perisai**: satu hari gagal per minggu (Senin–Minggu) otomatis dilindungi, jadi streak tidak putus.
+- Quest yang **dilewati** tidak memberi XP dan tidak dihitung selesai.
+- Hanya **hari ini dan kemarin** yang bisa diubah (lupa centang semalam masih bisa dibetulkan).
+
+**Di Telegram:**
+- `/quest` → daftar quest hari ini dengan tombol ✓ dan tombol **Buka Quest Log**
+- Pagi (~07.00 WIB): ringkasan tugas, lalu daftar quest hari ini
+- Malam (~20.00 WIB): pengingat quest yang belum selesai + tugas yang deadline-nya besok
+
+**Mengubah rutinitas:** edit `lib/quests.ts`, lalu push. Jangan mengganti `id` quest yang sudah dipakai.
+
+### Setup Quest Log
+1. Vercel → project → **Storage** (atau Marketplace) → tambahkan **Upstash Redis** → hubungkan ke project ini. Env Redis terisi otomatis.
+2. (Opsional) Isi `QUEST_WEB_KEY` dengan string acak (`openssl rand -hex 16`) kalau mau buka dari browser: `https://<app>.vercel.app/quest?key=<QUEST_WEB_KEY>`.
+3. Redeploy.
+4. Pasang tombol menu Quest Log di chat bot (sekali saja):
+   ```bash
+   curl -X POST "https://api.telegram.org/bot<TOKEN>/setChatMenuButton" \
+     -H "Content-Type: application/json" \
+     -d '{"menu_button":{"type":"web_app","text":"Quest","web_app":{"url":"https://<app>.vercel.app/quest"}}}'
+   ```
+5. Tambahkan `quest - Daily quest hari ini` di `/setcommands` BotFather.
+
+Uji lokal tanpa Redis dan tanpa token: `npm run dev` lalu buka `localhost:3000/quest` (data disimpan di memori, hilang saat server mati).
+
 ## Catatan
-- Cron di `vercel.json`: `0 0 * * *` = 00.00 UTC = 07.00 WIB. Di plan Hobby, waktu eksekusinya bisa meleset di dalam jam tersebut.
+- Cron di `vercel.json`: `0 0 * * *` = 07.00 WIB (ringkasan pagi) dan `0 13 * * *` = 20.00 WIB (pengingat malam). Di plan Hobby, waktu eksekusinya bisa meleset di dalam jam tersebut.
 - Google Tasks hanya menyimpan **tanggal** deadline, bukan jam.
 - Kalau Claude API gagal, tugas tetap tersimpan memakai teks aslimu sebagai judul.
 - Log error: Vercel → project → **Logs**.

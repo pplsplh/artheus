@@ -1,0 +1,3264 @@
+From 061598a4c39f9decfc4e0a3c2d3a948f3a3e7fb2 Mon Sep 17 00:00:00 2001
+From: Epul <epul@local>
+Date: Fri, 23 Oct 2026 11:42:26 +0000
+Subject: [PATCH] Quest Log: daily quest RPG (Telegram Mini App) + /quest,
+ pengingat malam
+
+---
+ .env.example                                  |  10 +
+ README.md                                     |  35 +-
+ app/api/cron/daily/route.ts                   |  16 +
+ app/api/cron/evening/route.ts                 |  45 ++
+ app/api/quest/mark/route.ts                   |  26 +
+ app/api/quest/side/route.ts                   |  19 +
+ app/api/quest/state/route.ts                  |  48 ++
+ app/api/telegram/webhook/route.ts             |  49 +-
+ app/quest/QuestApp.tsx                        | 552 ++++++++++++++
+ .../fonts/chakra-petch-latin-400-normal.woff2 | Bin 0 -> 9756 bytes
+ .../fonts/chakra-petch-latin-600-normal.woff2 | Bin 0 -> 9968 bytes
+ .../fonts/chakra-petch-latin-700-normal.woff2 | Bin 0 -> 9900 bytes
+ .../fonts/dotgothic16-latin-400-normal.woff2  | Bin 0 -> 10508 bytes
+ app/quest/layout.tsx                          |  34 +
+ app/quest/page.tsx                            |   7 +
+ app/quest/quest.css                           | 120 +++
+ lib/quest-bot.ts                              |  60 ++
+ lib/quest-engine.ts                           | 203 +++++
+ lib/quests.ts                                 |  48 ++
+ lib/redis.ts                                  | 100 +++
+ lib/telegram-auth.ts                          |  58 ++
+ package-lock.json                             | 703 +++++++++++++++++-
+ package.json                                  |   3 +
+ postcss.config.mjs                            |   3 +
+ vercel.json                                   |   5 +-
+ 25 files changed, 2131 insertions(+), 13 deletions(-)
+ create mode 100644 app/api/cron/evening/route.ts
+ create mode 100644 app/api/quest/mark/route.ts
+ create mode 100644 app/api/quest/side/route.ts
+ create mode 100644 app/api/quest/state/route.ts
+ create mode 100644 app/quest/QuestApp.tsx
+ create mode 100644 app/quest/fonts/chakra-petch-latin-400-normal.woff2
+ create mode 100644 app/quest/fonts/chakra-petch-latin-600-normal.woff2
+ create mode 100644 app/quest/fonts/chakra-petch-latin-700-normal.woff2
+ create mode 100644 app/quest/fonts/dotgothic16-latin-400-normal.woff2
+ create mode 100644 app/quest/layout.tsx
+ create mode 100644 app/quest/page.tsx
+ create mode 100644 app/quest/quest.css
+ create mode 100644 lib/quest-bot.ts
+ create mode 100644 lib/quest-engine.ts
+ create mode 100644 lib/quests.ts
+ create mode 100644 lib/redis.ts
+ create mode 100644 lib/telegram-auth.ts
+ create mode 100644 postcss.config.mjs
+
+diff --git a/.env.example b/.env.example
+index 54065eb..ec2f886 100644
+--- a/.env.example
++++ b/.env.example
+@@ -19,3 +19,13 @@ ANTHROPIC_MODEL=claude-haiku-5-5
+ 
+ # Vercel otomatis mengirim header "Authorization: Bearer <CRON_SECRET>" ke cron
+ CRON_SECRET=
++
++# ---------- Quest Log (daily quest RPG) ----------
++# Upstash Redis: diisi otomatis kalau kamu pasang integrasi Upstash dari Vercel Marketplace.
++# Kode juga menerima KV_REST_API_URL / KV_REST_API_TOKEN.
++UPSTASH_REDIS_REST_URL=
++UPSTASH_REDIS_REST_TOKEN=
++# Opsional: untuk membuka Quest Log dari browser biasa via /quest?key=<isi ini>. Minimal 16 karakter.
++QUEST_WEB_KEY=
++# Opsional: URL Mini App. Default: https://<domain production Vercel>/quest
++MINIAPP_URL=
+diff --git a/README.md b/README.md
+index c5f5528..e90e7e0 100644
+--- a/README.md
++++ b/README.md
+@@ -8,6 +8,7 @@ Kirim tugas ke bot Telegram dengan bahasa biasa → Claude membaca judul dan dea
+ - `/tugas` → semua tugas terbuka
+ - Tombol ✅ → tandai selesai di Google Tasks
+ - Hanya merespons chat ID-mu
++- **Quest Log**: daily quest bergaya RPG (Mini App di dalam Telegram) dengan XP, level, rank, stat, streak, dan perisai
+ 
+ ## Setup
+ 
+@@ -58,8 +59,40 @@ Harus muncul `"ok":true`.
+ 2. Isi `TELEGRAM_ALLOWED_CHAT_ID` di Vercel → **Redeploy**.
+ 3. Coba kirim: `revisi Bab 2 besok`.
+ 
++## Quest Log (daily quest RPG)
++
++Rutinitas harian jadi quest. Selesai → dapat XP ke stat terkait (STR, AGI, INT, VIT, SEN), naik level dan rank (E → S). Tugas Google Tasks yang deadline-nya dekat muncul sebagai **side quest** di halaman yang sama.
++
++**Aturan:**
++- Hari dianggap **aman** kalau minimal 60% quest hari itu selesai. Hari aman berturut-turut = streak.
++- Hari ini yang belum aman tidak memutus streak (masih berjalan).
++- **Perisai**: satu hari gagal per minggu (Senin–Minggu) otomatis dilindungi, jadi streak tidak putus.
++- Quest yang **dilewati** tidak memberi XP dan tidak dihitung selesai.
++- Hanya **hari ini dan kemarin** yang bisa diubah (lupa centang semalam masih bisa dibetulkan).
++
++**Di Telegram:**
++- `/quest` → daftar quest hari ini dengan tombol ✓ dan tombol **Buka Quest Log**
++- Pagi (~07.00 WIB): ringkasan tugas, lalu daftar quest hari ini
++- Malam (~20.00 WIB): pengingat quest yang belum selesai + tugas yang deadline-nya besok
++
++**Mengubah rutinitas:** edit `lib/quests.ts`, lalu push. Jangan mengganti `id` quest yang sudah dipakai.
++
++### Setup Quest Log
++1. Vercel → project → **Storage** (atau Marketplace) → tambahkan **Upstash Redis** → hubungkan ke project ini. Env Redis terisi otomatis.
++2. (Opsional) Isi `QUEST_WEB_KEY` dengan string acak (`openssl rand -hex 16`) kalau mau buka dari browser: `https://<app>.vercel.app/quest?key=<QUEST_WEB_KEY>`.
++3. Redeploy.
++4. Pasang tombol menu Quest Log di chat bot (sekali saja):
++   ```bash
++   curl -X POST "https://api.telegram.org/bot<TOKEN>/setChatMenuButton" \
++     -H "Content-Type: application/json" \
++     -d '{"menu_button":{"type":"web_app","text":"Quest","web_app":{"url":"https://<app>.vercel.app/quest"}}}'
++   ```
++5. Tambahkan `quest - Daily quest hari ini` di `/setcommands` BotFather.
++
++Uji lokal tanpa Redis dan tanpa token: `npm run dev` lalu buka `localhost:3000/quest` (data disimpan di memori, hilang saat server mati).
++
+ ## Catatan
+-- Cron di `vercel.json`: `0 0 * * *` = 00.00 UTC = 07.00 WIB. Di plan Hobby, waktu eksekusinya bisa meleset di dalam jam tersebut.
++- Cron di `vercel.json`: `0 0 * * *` = 07.00 WIB (ringkasan pagi) dan `0 13 * * *` = 20.00 WIB (pengingat malam). Di plan Hobby, waktu eksekusinya bisa meleset di dalam jam tersebut.
+ - Google Tasks hanya menyimpan **tanggal** deadline, bukan jam.
+ - Kalau Claude API gagal, tugas tetap tersimpan memakai teks aslimu sebagai judul.
+ - Log error: Vercel → project → **Logs**.
+diff --git a/app/api/cron/daily/route.ts b/app/api/cron/daily/route.ts
+index e7d00fd..2503ab9 100644
+--- a/app/api/cron/daily/route.ts
++++ b/app/api/cron/daily/route.ts
+@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
+ import { listOpenTasks } from "@/lib/google-tasks";
+ import { dailyDigest } from "@/lib/digest";
+ import { sendMessage } from "@/lib/telegram";
++import { getDay, getStreak } from "@/lib/quest-engine";
++import { renderQuests } from "@/lib/quest-bot";
++import { todayWIB } from "@/lib/date";
+ 
+ export async function GET(req: NextRequest) {
+   // Vercel Cron mengirim header ini otomatis kalau CRON_SECRET di-set
+@@ -14,5 +17,18 @@ export async function GET(req: NextRequest) {
+ 
+   const r = dailyDigest(await listOpenTasks());
+   await sendMessage(chatId, r.text, { reply_markup: r.reply_markup });
++
++  // Daily quest dikirim terpisah supaya tombolnya tidak bercampur dengan tombol tugas
++  try {
++    const today = todayWIB();
++    const [day, streak] = await Promise.all([getDay(today), getStreak(today)]);
++    if (day.scheduled) {
++      const q = renderQuests(day, streak);
++      await sendMessage(chatId, q.text, { reply_markup: q.reply_markup });
++    }
++  } catch (err) {
++    console.error("Daily quest pagi gagal:", err);
++  }
++
+   return NextResponse.json({ ok: true });
+ }
+diff --git a/app/api/cron/evening/route.ts b/app/api/cron/evening/route.ts
+new file mode 100644
+index 0000000..2911e6f
+--- /dev/null
++++ b/app/api/cron/evening/route.ts
+@@ -0,0 +1,45 @@
++import { NextRequest, NextResponse } from "next/server";
++import { listOpenTasks } from "@/lib/google-tasks";
++import { esc, sendMessage } from "@/lib/telegram";
++import { getDay, getStreak } from "@/lib/quest-engine";
++import { renderQuests } from "@/lib/quest-bot";
++import { addDays, todayWIB } from "@/lib/date";
++
++/** Sekitar 20.00 WIB: ingatkan quest yang belum selesai dan tugas yang deadline-nya besok */
++export async function GET(req: NextRequest) {
++  if (req.headers.get("authorization") !== `Bearer ${process.env.CRON_SECRET}`) {
++    return new NextResponse("unauthorized", { status: 401 });
++  }
++  const chatId = process.env.TELEGRAM_ALLOWED_CHAT_ID;
++  if (!chatId) return NextResponse.json({ ok: false, error: "TELEGRAM_ALLOWED_CHAT_ID kosong" });
++
++  const today = todayWIB();
++  const sent: string[] = [];
++
++  const [day, streak] = await Promise.all([getDay(today), getStreak(today)]);
++  const pending = day.quests.filter((q) => q.status === "todo").length;
++  if (day.scheduled && pending) {
++    const header = day.cleared
++      ? `🌙 <b>Hari ini sudah aman.</b> Masih ada ${pending} quest kalau mau tambah XP.`
++      : `🌙 <b>${streak.streak ? `Streak ${streak.streak} hari belum aman.` : "Quest hari ini belum aman."}</b> Kurang ${
++          day.target - day.done
++        } quest lagi.${streak.shieldLeft ? " Perisai minggu ini masih ada." : ""}`;
++    const r = renderQuests(day, streak, header);
++    await sendMessage(chatId, r.text, { reply_markup: r.reply_markup });
++    sent.push("quests");
++  }
++
++  try {
++    const tomorrow = addDays(today, 1);
++    const dueTomorrow = (await listOpenTasks()).filter((t) => t.due?.slice(0, 10) === tomorrow);
++    if (dueTomorrow.length) {
++      const list = dueTomorrow.map((t, i) => `${i + 1}. ${esc(t.title)}`).join("\n");
++      await sendMessage(chatId, `⏰ <b>Deadline besok</b>\n\n${list}`);
++      sent.push("tomorrow");
++    }
++  } catch (err) {
++    console.error("Cek deadline besok gagal:", err);
++  }
++
++  return NextResponse.json({ ok: true, sent });
++}
+diff --git a/app/api/quest/mark/route.ts b/app/api/quest/mark/route.ts
+new file mode 100644
+index 0000000..ae4c784
+--- /dev/null
++++ b/app/api/quest/mark/route.ts
+@@ -0,0 +1,26 @@
++import { NextRequest, NextResponse } from "next/server";
++import { isOwnerRequest } from "@/lib/telegram-auth";
++import { getDay, getProfile, getStreak, setStatus, type Status } from "@/lib/quest-engine";
++import { todayWIB } from "@/lib/date";
++
++export const dynamic = "force-dynamic";
++
++const STATUSES: Status[] = ["todo", "done", "skipped"];
++
++export async function POST(req: NextRequest) {
++  if (!isOwnerRequest(req.headers)) return NextResponse.json({ error: "Akses ditolak" }, { status: 401 });
++
++  const body = (await req.json().catch(() => ({}))) as { date?: string; questId?: string; status?: string };
++  if (!body.date || !body.questId || !STATUSES.includes(body.status as Status)) {
++    return NextResponse.json({ error: "date, questId, dan status wajib diisi" }, { status: 400 });
++  }
++
++  try {
++    const result = await setStatus(body.date, body.questId, body.status as Status);
++    const [day, streak, profile] = await Promise.all([getDay(body.date), getStreak(todayWIB()), getProfile()]);
++    return NextResponse.json({ result, day, streak, profile });
++  } catch (err) {
++    const message = String(err instanceof Error ? err.message : err);
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/app/api/quest/side/route.ts b/app/api/quest/side/route.ts
+new file mode 100644
+index 0000000..f27ffe8
+--- /dev/null
++++ b/app/api/quest/side/route.ts
+@@ -0,0 +1,19 @@
++import { NextRequest, NextResponse } from "next/server";
++import { isOwnerRequest } from "@/lib/telegram-auth";
++import { completeTask } from "@/lib/google-tasks";
++
++export const dynamic = "force-dynamic";
++
++export async function POST(req: NextRequest) {
++  if (!isOwnerRequest(req.headers)) return NextResponse.json({ error: "Akses ditolak" }, { status: 401 });
++
++  const { taskId } = (await req.json().catch(() => ({}))) as { taskId?: string };
++  if (!taskId) return NextResponse.json({ error: "taskId wajib diisi" }, { status: 400 });
++
++  try {
++    await completeTask(taskId);
++    return NextResponse.json({ ok: true });
++  } catch (err) {
++    return NextResponse.json({ error: String(err instanceof Error ? err.message : err) }, { status: 502 });
++  }
++}
+diff --git a/app/api/quest/state/route.ts b/app/api/quest/state/route.ts
+new file mode 100644
+index 0000000..af63286
+--- /dev/null
++++ b/app/api/quest/state/route.ts
+@@ -0,0 +1,48 @@
++import { NextRequest, NextResponse } from "next/server";
++import { isOwnerRequest } from "@/lib/telegram-auth";
++import { editable, getDay, getProfile, getStreak } from "@/lib/quest-engine";
++import { listOpenTasks } from "@/lib/google-tasks";
++import { addDays, todayWIB } from "@/lib/date";
++
++export const dynamic = "force-dynamic";
++
++const SIDE_DAYS = 7;
++const SIDE_MAX = 8;
++
++export async function GET(req: NextRequest) {
++  if (!isOwnerRequest(req.headers)) return NextResponse.json({ error: "Akses ditolak" }, { status: 401 });
++
++  const today = todayWIB();
++  const asked = req.nextUrl.searchParams.get("date") ?? today;
++  const date = /^\d{4}-\d{2}-\d{2}$/.test(asked) && asked <= today ? asked : today;
++
++  try {
++    const [day, streak, profile, side] = await Promise.all([
++      getDay(date),
++      getStreak(today),
++      getProfile(),
++      sideQuests(today),
++    ]);
++    return NextResponse.json({ today, editable: editable(date, today), day, streak, profile, side });
++  } catch (err) {
++    console.error(err);
++    return NextResponse.json({ error: String(err instanceof Error ? err.message : err) }, { status: 500 });
++  }
++}
++
++/** Tugas Google Tasks yang terlambat atau jatuh tempo dalam 7 hari. Gagal tidak menghentikan halaman. */
++async function sideQuests(today: string) {
++  try {
++    const limit = addDays(today, SIDE_DAYS);
++    const tasks = await listOpenTasks();
++    const dated = tasks.filter((t) => t.due && t.due.slice(0, 10) <= limit);
++    return {
++      ok: true,
++      items: dated.slice(0, SIDE_MAX).map((t) => ({ id: t.id, title: t.title, due: t.due!.slice(0, 10) })),
++      more: dated.length - Math.min(dated.length, SIDE_MAX) + (tasks.length - dated.length),
++    };
++  } catch (err) {
++    console.error("Side quest gagal dimuat:", err);
++    return { ok: false, items: [], more: 0 };
++  }
++}
+diff --git a/app/api/telegram/webhook/route.ts b/app/api/telegram/webhook/route.ts
+index 70bddd6..d9109b0 100644
+--- a/app/api/telegram/webhook/route.ts
++++ b/app/api/telegram/webhook/route.ts
+@@ -3,9 +3,11 @@ import { completeTask, createTask, listOpenTasks } from "@/lib/google-tasks";
+ import { parseTask } from "@/lib/parse-task";
+ import { allTasks, dailyDigest } from "@/lib/digest";
+ import { esc, sendMessage, tg } from "@/lib/telegram";
+-import { prettyDate } from "@/lib/date";
++import { prettyDate, todayWIB } from "@/lib/date";
++import { getDay, getStreak, setStatus } from "@/lib/quest-engine";
++import { renderQuests } from "@/lib/quest-bot";
+ 
+-type InlineKeyboard = { text: string; callback_data?: string }[][];
++type InlineKeyboard = { text: string; callback_data?: string; web_app?: { url: string } }[][];
+ 
+ type Update = {
+   message?: { chat: { id: number }; text?: string };
+@@ -23,7 +25,8 @@ const HELP = `Kirim tugas dengan bahasa biasa, contoh:
+ 
+ Perintah:
+ /hari_ini – yang terlambat, hari ini, dan 7 hari ke depan
+-/tugas – semua tugas terbuka`;
++/tugas – semua tugas terbuka
++/quest – daily quest hari ini`;
+ 
+ const isAllowed = (chatId: number) => String(chatId) === process.env.TELEGRAM_ALLOWED_CHAT_ID;
+ 
+@@ -68,6 +71,7 @@ async function onMessage(msg: NonNullable<Update["message"]>) {
+     const r = allTasks(await listOpenTasks());
+     return void (await sendMessage(chatId, r.text, { reply_markup: r.reply_markup }));
+   }
++  if (command === "/quest") return void (await sendQuests(chatId));
+   if (command) return void (await sendMessage(chatId, `Perintah nggak dikenal.\n\n${HELP}`));
+ 
+   const task = await parseTask(text);
+@@ -80,7 +84,12 @@ async function onMessage(msg: NonNullable<Update["message"]>) {
+ }
+ 
+ async function onButton(cb: NonNullable<Update["callback_query"]>) {
+-  if (!isAllowed(cb.from.id) || !cb.data?.startsWith("done:") || !cb.message) {
++  if (!isAllowed(cb.from.id) || !cb.message) {
++    await tg("answerCallbackQuery", { callback_query_id: cb.id });
++    return;
++  }
++  if (cb.data?.startsWith("q:")) return void (await onQuestButton(cb));
++  if (!cb.data?.startsWith("done:")) {
+     await tg("answerCallbackQuery", { callback_query_id: cb.id });
+     return;
+   }
+@@ -98,3 +107,35 @@ async function onButton(cb: NonNullable<Update["callback_query"]>) {
+     reply_markup: { inline_keyboard: rows },
+   });
+ }
++
++async function sendQuests(chatId: number) {
++  const today = todayWIB();
++  const [day, streak] = await Promise.all([getDay(today), getStreak(today)]);
++  const r = renderQuests(day, streak);
++  await sendMessage(chatId, r.text, { reply_markup: r.reply_markup });
++}
++
++/** Tombol "q:<tanggal>:<id>" → tandai quest selesai, lalu perbarui pesan yang sama */
++async function onQuestButton(cb: NonNullable<Update["callback_query"]>) {
++  const [, date, id] = (cb.data ?? "").split(":");
++  const msg = cb.message!;
++  let notice = "";
++  try {
++    const r = await setStatus(date, id, "done");
++    notice = r.xpDelta ? `+${r.xpDelta} XP` : "Sudah selesai";
++    if (r.levelUp) notice += ` · LEVEL UP! Lv ${r.levelUp}`;
++  } catch (err) {
++    notice = String(err instanceof Error ? err.message : err).slice(0, 180);
++  }
++  await tg("answerCallbackQuery", { callback_query_id: cb.id, text: notice });
++
++  const [day, streak] = await Promise.all([getDay(date), getStreak(todayWIB())]);
++  const r = renderQuests(day, streak);
++  await tg("editMessageText", {
++    chat_id: msg.chat.id,
++    message_id: msg.message_id,
++    text: r.text,
++    parse_mode: "HTML",
++    reply_markup: r.reply_markup ?? { inline_keyboard: [] },
++  });
++}
+diff --git a/app/quest/QuestApp.tsx b/app/quest/QuestApp.tsx
+new file mode 100644
+index 0000000..1824c2f
+--- /dev/null
++++ b/app/quest/QuestApp.tsx
+@@ -0,0 +1,552 @@
++"use client";
++
++import { useCallback, useEffect, useMemo, useRef, useState } from "react";
++
++// ---------- Tipe data dari API ----------
++type Status = "todo" | "done" | "skipped";
++type Stat = "STR" | "AGI" | "INT" | "VIT" | "SEN";
++type DayQuest = { id: string; title: string; stat: Stat; target?: string; xp: number; status: Status };
++type Day = {
++  date: string;
++  quests: DayQuest[];
++  done: number;
++  skipped: number;
++  scheduled: number;
++  target: number;
++  cleared: boolean;
++};
++type Streak = { streak: number; shieldLeft: number; protectedDays: string[] };
++type Profile = {
++  totalXp: number;
++  level: number;
++  rank: string;
++  intoLevel: number;
++  needed: number;
++  stats: { key: Stat; name: string; color: string; xp: number; level: number }[];
++};
++type Side = { ok: boolean; items: { id: string; title: string; due: string }[]; more: number };
++type State = { today: string; editable: boolean; day: Day; streak: Streak; profile: Profile; side: Side };
++type MarkResponse = {
++  result: { xpDelta: number; levelUp: number | null; quest: { title: string } };
++  day: Day;
++  streak: Streak;
++  profile: Profile;
++};
++
++type TgWebApp = {
++  initData: string;
++  initDataUnsafe?: { user?: { first_name?: string } };
++  ready: () => void;
++  expand: () => void;
++  setHeaderColor?: (c: string) => void;
++  setBackgroundColor?: (c: string) => void;
++  HapticFeedback?: { notificationOccurred: (t: "success" | "error" | "warning") => void };
++};
++declare global {
++  interface Window {
++    Telegram?: { WebApp?: TgWebApp };
++  }
++}
++
++const STAT_COLOR: Record<Stat, string> = {
++  STR: "#FF5C6C",
++  AGI: "#FFB547",
++  INT: "#A594FF",
++  VIT: "#3DDBB0",
++  SEN: "#5CC8FF",
++};
++
++const XP_SEGMENTS = 20;
++
++// ---------- Utilitas ----------
++function loadTelegram(): Promise<TgWebApp | null> {
++  return new Promise((resolve) => {
++    if (window.Telegram?.WebApp) return resolve(window.Telegram.WebApp);
++    const s = document.createElement("script");
++    s.src = "https://telegram.org/js/telegram-web-app.js";
++    s.async = true;
++    const done = () => resolve(window.Telegram?.WebApp ?? null);
++    s.onload = done;
++    s.onerror = () => resolve(null);
++    document.head.appendChild(s);
++    setTimeout(done, 2500);
++  });
++}
++
++function addDays(ymd: string, n: number) {
++  const [y, m, d] = ymd.split("-").map(Number);
++  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
++}
++
++function dayLabel(ymd: string, today: string) {
++  if (ymd === today) return "Hari ini";
++  if (ymd === addDays(today, -1)) return "Kemarin";
++  return new Intl.DateTimeFormat("id-ID", { timeZone: "UTC", weekday: "long" }).format(new Date(`${ymd}T00:00:00Z`));
++}
++
++function dateLabel(ymd: string) {
++  return new Intl.DateTimeFormat("id-ID", { timeZone: "UTC", day: "numeric", month: "long" }).format(
++    new Date(`${ymd}T00:00:00Z`)
++  );
++}
++
++function dueLabel(due: string, today: string) {
++  if (due < today) return { text: "Terlambat", tone: "text-danger" };
++  if (due === today) return { text: "Hari ini", tone: "text-gold" };
++  if (due === addDays(today, 1)) return { text: "Besok", tone: "text-gold" };
++  return {
++    text: new Intl.DateTimeFormat("id-ID", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" }).format(
++      new Date(`${due}T00:00:00Z`)
++    ),
++    tone: "text-muted",
++  };
++}
++
++// ---------- Komponen utama ----------
++export default function QuestApp() {
++  const [state, setState] = useState<State | null>(null);
++  const [error, setError] = useState<string | null>(null);
++  const [date, setDate] = useState<string | null>(null);
++  const [tab, setTab] = useState<Status>("todo");
++  const [busy, setBusy] = useState<string | null>(null);
++  const [name, setName] = useState("Hunter");
++  const [system, setSystem] = useState<{ id: number; lines: string[] } | null>(null);
++  const auth = useRef<Record<string, string>>({});
++  const tg = useRef<TgWebApp | null>(null);
++
++  const api = useCallback(async <T,>(path: string, body?: unknown): Promise<T> => {
++    const res = await fetch(path, {
++      method: body === undefined ? "GET" : "POST",
++      headers: { "Content-Type": "application/json", ...auth.current },
++      body: body === undefined ? undefined : JSON.stringify(body),
++      cache: "no-store",
++    });
++    const data = (await res.json().catch(() => ({}))) as T & { error?: string };
++    if (!res.ok) throw new Error(data.error ?? `Server membalas ${res.status}`);
++    return data;
++  }, []);
++
++  const load = useCallback(
++    async (d?: string) => {
++      try {
++        const s = await api<State>(`/api/quest/state${d ? `?date=${d}` : ""}`);
++        setState(s);
++        setDate(s.day.date);
++        setError(null);
++      } catch (e) {
++        setError(e instanceof Error ? e.message : String(e));
++      }
++    },
++    [api]
++  );
++
++  useEffect(() => {
++    (async () => {
++      const key = new URLSearchParams(window.location.search).get("key");
++      if (key) auth.current["x-quest-key"] = key;
++      const app = await loadTelegram();
++      if (app?.initData) {
++        tg.current = app;
++        auth.current["x-tg-init-data"] = app.initData;
++        app.ready();
++        app.expand();
++        app.setHeaderColor?.("#060912");
++        app.setBackgroundColor?.("#060912");
++        const first = app.initDataUnsafe?.user?.first_name;
++        if (first) setName(first);
++      }
++      await load();
++    })();
++  }, [load]);
++
++  const say = useCallback((lines: string[]) => {
++    setSystem({ id: Date.now(), lines });
++  }, []);
++
++  useEffect(() => {
++    if (!system) return;
++    const t = setTimeout(() => setSystem(null), 3200);
++    return () => clearTimeout(t);
++  }, [system]);
++
++  async function mark(q: DayQuest, status: Status) {
++    if (!state) return;
++    setBusy(q.id);
++    try {
++      const r = await api<MarkResponse>("/api/quest/mark", { date: state.day.date, questId: q.id, status });
++      const wasCleared = state.day.cleared;
++      setState({ ...state, day: r.day, streak: r.streak, profile: r.profile });
++      const lines: string[] = [];
++      if (status === "done") lines.push(`Quest selesai: ${q.title}.`, `+${r.result.xpDelta} XP ke ${q.stat}.`);
++      else if (status === "skipped") lines.push(`Quest dilewati: ${q.title}.`, "Tidak ada XP.");
++      else lines.push(`Quest dikembalikan: ${q.title}.`, r.result.xpDelta < 0 ? `${r.result.xpDelta} XP.` : "");
++      if (r.result.levelUp) lines.push(`Naik level. Sekarang Lv ${r.result.levelUp}, rank ${r.profile.rank}.`);
++      if (!wasCleared && r.day.cleared) lines.push("Hari ini aman. Streak berlanjut.");
++      say(lines.filter(Boolean));
++      tg.current?.HapticFeedback?.notificationOccurred(status === "done" ? "success" : "warning");
++    } catch (e) {
++      say([`Gagal menyimpan: ${e instanceof Error ? e.message : String(e)}`]);
++      tg.current?.HapticFeedback?.notificationOccurred("error");
++    } finally {
++      setBusy(null);
++    }
++  }
++
++  async function finishSide(id: string, title: string) {
++    if (!state) return;
++    setBusy(id);
++    try {
++      await api("/api/quest/side", { taskId: id });
++      setState({ ...state, side: { ...state.side, items: state.side.items.filter((t) => t.id !== id) } });
++      say([`Side quest selesai: ${title}.`, "Ditandai selesai di Google Tasks."]);
++      tg.current?.HapticFeedback?.notificationOccurred("success");
++    } catch (e) {
++      say([`Gagal menyimpan: ${e instanceof Error ? e.message : String(e)}`]);
++    } finally {
++      setBusy(null);
++    }
++  }
++
++  const shown = useMemo(() => state?.day.quests.filter((q) => q.status === tab) ?? [], [state, tab]);
++
++  if (error && !state) return <Fatal message={error} onRetry={() => load()} />;
++  if (!state || !date) return <Loading />;
++
++  const { day, profile, streak, side, today, editable } = state;
++  const counts = { todo: day.quests.filter((q) => q.status === "todo").length, done: day.done, skipped: day.skipped };
++  const filled = Math.round((profile.intoLevel / profile.needed) * XP_SEGMENTS);
++
++  return (
++    <main className="mx-auto flex max-w-md flex-col gap-4">
++      {/* Jendela status */}
++      <section className="win p-4" aria-label="Status karakter">
++        <div className="flex items-start justify-between gap-3">
++          <div className="min-w-0">
++            <p className="font-pixel text-[11px] text-glow">STATUS</p>
++            <h1 className="font-pixel truncate text-3xl leading-tight text-white">{name}</h1>
++          </div>
++          <div className="flex shrink-0 items-center gap-3 text-right">
++            <div>
++              <p className="font-pixel text-4xl leading-none text-gold">{profile.rank}</p>
++              <p className="text-[11px] text-muted">Rank</p>
++            </div>
++            <div>
++              <p className="font-pixel text-4xl leading-none text-white">{profile.level}</p>
++              <p className="text-[11px] text-muted">Level</p>
++            </div>
++          </div>
++        </div>
++
++        <div className="mt-3">
++          <div className="flex gap-[3px]" role="img" aria-label={`${profile.intoLevel} dari ${profile.needed} XP`}>
++            {Array.from({ length: XP_SEGMENTS }, (_, i) => (
++              <span key={i} className="xp-seg h-2.5 flex-1 rounded-[1px]" data-on={i < filled} />
++            ))}
++          </div>
++          <div className="mt-1.5 flex justify-between text-xs text-muted">
++            <span>
++              <span className="font-pixel text-ice">{profile.intoLevel}</span> / {profile.needed} XP
++            </span>
++            <span>{profile.totalXp} XP total</span>
++          </div>
++        </div>
++
++        <div className="mt-3 flex gap-2 text-sm">
++          <span className="flex items-center gap-1.5 rounded border border-gold/40 px-2 py-1 text-gold">
++            <span aria-hidden>🔥</span>
++            <span className="font-pixel">{streak.streak}</span> hari
++          </span>
++          <span
++            className={`flex items-center gap-1.5 rounded border px-2 py-1 ${
++              streak.shieldLeft ? "border-glow/40 text-glow" : "border-line text-muted"
++            }`}
++          >
++            <span aria-hidden>🛡</span>
++            {streak.shieldLeft ? "Perisai siap" : "Perisai terpakai"}
++          </span>
++        </div>
++
++        <ul className="mt-4 grid grid-cols-5 gap-1.5" aria-label="Stat">
++          {profile.stats.map((s) => (
++            <li key={s.key} className="rounded border border-line/80 bg-deep/70 px-1 py-1.5 text-center">
++              <p className="font-pixel text-[11px]" style={{ color: s.color }}>
++                {s.key}
++              </p>
++              <p className="font-pixel text-lg leading-tight text-white">{s.level}</p>
++            </li>
++          ))}
++        </ul>
++      </section>
++
++      {/* Daily quest */}
++      <section className="win p-4" aria-label="Daily quest">
++        <div className="flex items-center justify-between gap-2">
++          <button
++            className="font-pixel grid size-9 place-items-center rounded border border-line text-ice hover:border-glow"
++            onClick={() => load(addDays(day.date, -1))}
++            aria-label="Hari sebelumnya"
++          >
++            ◀
++          </button>
++          <div className="text-center">
++            <h2 className="font-pixel text-xl text-white">{dayLabel(day.date, today)}</h2>
++            <p className="text-xs text-muted">{dateLabel(day.date)}</p>
++          </div>
++          <button
++            className="font-pixel grid size-9 place-items-center rounded border border-line text-ice hover:border-glow disabled:opacity-25"
++            onClick={() => load(addDays(day.date, 1))}
++            disabled={day.date >= today}
++            aria-label="Hari berikutnya"
++          >
++            ▶
++          </button>
++        </div>
++
++        {day.scheduled > 0 && (
++          <div className="mt-3 rounded border border-line/70 bg-deep/60 px-3 py-2">
++            <div className="flex items-center justify-between text-xs">
++              <span className={day.cleared ? "text-gold" : "text-muted"}>
++                {day.cleared
++                  ? "Hari ini aman untuk streak"
++                  : `Selesaikan ${day.target - day.done} lagi untuk mengamankan streak`}
++              </span>
++              <span className="font-pixel text-ice">
++                {day.done}/{day.scheduled}
++              </span>
++            </div>
++            <div className="mt-1.5 flex gap-1">
++              {day.quests.map((q, i) => (
++                <span
++                  key={q.id}
++                  className={`h-1.5 flex-1 rounded-full ${
++                    q.status === "done" ? "bg-gold" : i < day.target ? "bg-line" : "bg-line/40"
++                  }`}
++                />
++              ))}
++            </div>
++          </div>
++        )}
++
++        <div className="mt-3 grid grid-cols-3 gap-1.5" role="tablist" aria-label="Filter quest">
++          {(
++            [
++              ["todo", "Quest"],
++              ["done", "Selesai"],
++              ["skipped", "Dilewati"],
++            ] as [Status, string][]
++          ).map(([key, label]) => (
++            <button
++              key={key}
++              role="tab"
++              aria-selected={tab === key}
++              onClick={() => setTab(key)}
++              className={`rounded border px-2 py-2 text-sm font-semibold transition-colors ${
++                tab === key ? "border-glow bg-glow/15 text-white" : "border-line text-muted hover:text-ice"
++              }`}
++            >
++              {label} <span className="font-pixel">{counts[key]}</span>
++            </button>
++          ))}
++        </div>
++
++        {!editable && (
++          <p className="mt-3 text-xs text-muted">Riwayat. Hanya hari ini dan kemarin yang bisa diubah.</p>
++        )}
++
++        <ul className="mt-3 flex flex-col gap-2">
++          {shown.map((q, i) => (
++            <QuestRow
++              key={q.id}
++              q={q}
++              active={editable && tab === "todo" && i === 0}
++              editable={editable}
++              busy={busy === q.id}
++              onMark={(s) => mark(q, s)}
++            />
++          ))}
++        </ul>
++
++        {shown.length === 0 && <EmptyTab tab={tab} scheduled={day.scheduled} />}
++      </section>
++
++      {/* Side quest dari Google Tasks */}
++      <section className="win win-quiet p-4" aria-label="Side quest">
++        <div className="flex items-baseline justify-between">
++          <h2 className="font-pixel text-lg text-white">Side quest</h2>
++          <p className="text-xs text-muted">Google Tasks, 7 hari ke depan</p>
++        </div>
++        {!side.ok && <p className="mt-2 text-sm text-danger">Google Tasks tidak bisa dimuat. Cek log Vercel.</p>}
++        {side.ok && side.items.length === 0 && (
++          <p className="mt-2 text-sm text-muted">Tidak ada deadline dalam 7 hari. Kirim tugas baru lewat chat bot.</p>
++        )}
++        <ul className="mt-2 flex flex-col">
++          {side.items.map((t) => {
++            const due = dueLabel(t.due, today);
++            return (
++              <li key={t.id} className="flex items-center gap-3 border-b border-line/50 py-2.5 last:border-0">
++                <div className="min-w-0 flex-1">
++                  <p className="text-sm leading-snug text-ice">{t.title}</p>
++                  <p className={`text-xs ${due.tone}`}>{due.text}</p>
++                </div>
++                <button
++                  onClick={() => finishSide(t.id, t.title)}
++                  disabled={busy === t.id}
++                  className="shrink-0 rounded border border-line px-2.5 py-1.5 text-xs font-semibold text-ice hover:border-glow disabled:opacity-40"
++                >
++                  {busy === t.id ? "…" : "Selesai"}
++                </button>
++              </li>
++            );
++          })}
++        </ul>
++        {side.more > 0 && <p className="mt-2 text-xs text-muted">+{side.more} tugas lain. Ketik /tugas di bot.</p>}
++      </section>
++
++      {system && <SystemMessage key={system.id} lines={system.lines} />}
++    </main>
++  );
++}
++
++// ---------- Baris quest ----------
++function QuestRow({
++  q,
++  active,
++  editable,
++  busy,
++  onMark,
++}: {
++  q: DayQuest;
++  active: boolean;
++  editable: boolean;
++  busy: boolean;
++  onMark: (s: Status) => void;
++}) {
++  const color = STAT_COLOR[q.stat];
++  const finished = q.status !== "todo";
++  return (
++    <li
++      data-active={active}
++      className={`row relative flex items-center gap-2 overflow-hidden rounded border bg-deep/80 py-3 pr-2.5 pl-3 ${
++        active ? "border-glow/60" : finished ? "border-line/50" : "border-line"
++      }`}
++    >
++      <span className="absolute inset-y-0 left-0 w-[3px]" style={{ background: color }} aria-hidden />
++      <span className="cursor font-pixel text-gold" aria-hidden>
++        ▶
++      </span>
++      <div className="min-w-0 flex-1">
++        <p className={`text-[15px] leading-snug font-semibold ${finished ? "text-muted line-through" : "text-white"}`}>
++          {q.title}
++        </p>
++        <p className="mt-0.5 flex flex-wrap items-center gap-x-2 text-xs text-muted">
++          <span className="font-pixel" style={{ color }}>
++            {q.stat}
++          </span>
++          {q.target && <span>{q.target}</span>}
++          <span className="text-gold/80">+{q.xp} XP</span>
++        </p>
++      </div>
++      {editable && (
++        <div className="flex shrink-0 items-center gap-1.5">
++          {q.status === "todo" ? (
++            <>
++              <button
++                onClick={() => onMark("skipped")}
++                disabled={busy}
++                className="rounded px-2 py-2 text-xs text-muted hover:text-ice disabled:opacity-40"
++              >
++                Lewati
++              </button>
++              <button
++                onClick={() => onMark("done")}
++                disabled={busy}
++                aria-label={`Selesaikan ${q.title}`}
++                className="font-pixel grid size-11 place-items-center rounded border-2 border-glow bg-glow/15 text-lg text-white shadow-[0_0_12px_rgb(76_155_255/0.35)] hover:bg-glow/30 disabled:opacity-40"
++              >
++                {busy ? "…" : "✓"}
++              </button>
++            </>
++          ) : (
++            <button
++              onClick={() => onMark("todo")}
++              disabled={busy}
++              className="rounded border border-line px-2.5 py-1.5 text-xs text-muted hover:text-ice disabled:opacity-40"
++            >
++              {busy ? "…" : "Batalkan"}
++            </button>
++          )}
++        </div>
++      )}
++    </li>
++  );
++}
++
++function EmptyTab({ tab, scheduled }: { tab: Status; scheduled: number }) {
++  const text =
++    scheduled === 0
++      ? "Tidak ada quest terjadwal di hari ini."
++      : tab === "todo"
++        ? "Semua quest sudah ditangani. Lihat tab Selesai."
++        : tab === "done"
++          ? "Belum ada quest yang selesai."
++          : "Tidak ada quest yang dilewati.";
++  return <p className="mt-3 rounded border border-dashed border-line px-3 py-4 text-center text-sm text-muted">{text}</p>;
++}
++
++// ---------- Kotak pesan [SYSTEM] ----------
++function SystemMessage({ lines }: { lines: string[] }) {
++  const full = lines.join("\n");
++  const [shown, setShown] = useState(() =>
++    typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches ? full : ""
++  );
++
++  useEffect(() => {
++    if (shown === full) return;
++    const t = setTimeout(() => setShown(full.slice(0, shown.length + 2)), 16);
++    return () => clearTimeout(t);
++  }, [shown, full]);
++
++  return (
++    <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 px-3 pb-[max(env(safe-area-inset-bottom),14px)]">
++      <div className="win sys-enter mx-auto max-w-md px-4 py-3" role="status" aria-live="polite">
++        <p className="font-pixel text-xs text-glow">[SYSTEM]</p>
++        <p className="mt-1 text-sm leading-relaxed whitespace-pre-line text-white" aria-hidden>
++          {shown}
++        </p>
++        <span className="sr-only">{full}</span>
++      </div>
++    </div>
++  );
++}
++
++function Loading() {
++  return (
++    <main className="mx-auto grid min-h-[70dvh] max-w-md place-items-center">
++      <p className="font-pixel text-glow">Memuat quest…</p>
++    </main>
++  );
++}
++
++function Fatal({ message, onRetry }: { message: string; onRetry: () => void }) {
++  const denied = /ditolak/i.test(message);
++  return (
++    <main className="mx-auto mt-10 max-w-md">
++      <div className="win p-5">
++        <p className="font-pixel text-xs text-danger">[SYSTEM]</p>
++        <h1 className="font-pixel mt-1 text-xl text-white">
++          {denied ? "Akses ditolak" : "Quest gagal dimuat"}
++        </h1>
++        <p className="mt-2 text-sm text-ice">
++          {denied
++            ? "Buka halaman ini lewat tombol Buka Quest Log di bot Artheus, atau tambahkan ?key= di URL."
++            : message}
++        </p>
++        {!denied && (
++          <button onClick={onRetry} className="mt-4 rounded border border-glow px-3 py-2 text-sm text-white">
++            Coba lagi
++          </button>
++        )}
++      </div>
++    </main>
++  );
++}
+diff --git a/app/quest/fonts/chakra-petch-latin-400-normal.woff2 b/app/quest/fonts/chakra-petch-latin-400-normal.woff2
+new file mode 100644
+index 0000000000000000000000000000000000000000..f7a66022dde0ab1d862d202807f5988453a9bdf4
+GIT binary patch
+literal 9756
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/quest/fonts/chakra-petch-latin-600-normal.woff2 b/app/quest/fonts/chakra-petch-latin-600-normal.woff2
+new file mode 100644
+index 0000000000000000000000000000000000000000..e4d90d5186d9da8c65e075940cc74449d94bbef4
+GIT binary patch
+literal 9968
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/quest/fonts/chakra-petch-latin-700-normal.woff2 b/app/quest/fonts/chakra-petch-latin-700-normal.woff2
+new file mode 100644
+index 0000000000000000000000000000000000000000..de88f23d8b503ad1be8b07813c822145cde69308
+GIT binary patch
+literal 9900
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/quest/fonts/dotgothic16-latin-400-normal.woff2 b/app/quest/fonts/dotgothic16-latin-400-normal.woff2
+new file mode 100644
+index 0000000000000000000000000000000000000000..7ce4ab65031b15317bd0d9af6f04aeea3388542e
+GIT binary patch
+literal 10508
+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
+BbejMG
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/quest/layout.tsx b/app/quest/layout.tsx
+new file mode 100644
+index 0000000..5309f31
+--- /dev/null
++++ b/app/quest/layout.tsx
+@@ -0,0 +1,34 @@
++import type { Metadata, Viewport } from "next";
++import localFont from "next/font/local";
++import "./quest.css";
++
++const pixel = localFont({
++  src: "./fonts/dotgothic16-latin-400-normal.woff2",
++  variable: "--nf-pixel",
++  display: "swap",
++  fallback: ["ui-monospace", "monospace"],
++});
++
++const body = localFont({
++  src: [
++    { path: "./fonts/chakra-petch-latin-400-normal.woff2", weight: "400" },
++    { path: "./fonts/chakra-petch-latin-600-normal.woff2", weight: "600" },
++    { path: "./fonts/chakra-petch-latin-700-normal.woff2", weight: "700" },
++  ],
++  variable: "--nf-body",
++  display: "swap",
++  fallback: ["system-ui", "sans-serif"],
++});
++
++export const metadata: Metadata = { title: "Quest Log — Artheus" };
++
++export const viewport: Viewport = {
++  width: "device-width",
++  initialScale: 1,
++  viewportFit: "cover",
++  themeColor: "#060912",
++};
++
++export default function QuestLayout({ children }: { children: React.ReactNode }) {
++  return <div className={`${pixel.variable} ${body.variable} quest-root`}>{children}</div>;
++}
+diff --git a/app/quest/page.tsx b/app/quest/page.tsx
+new file mode 100644
+index 0000000..03429a5
+--- /dev/null
++++ b/app/quest/page.tsx
+@@ -0,0 +1,7 @@
++import QuestApp from "./QuestApp";
++
++export const dynamic = "force-dynamic";
++
++export default function QuestPage() {
++  return <QuestApp />;
++}
+diff --git a/app/quest/quest.css b/app/quest/quest.css
+new file mode 100644
+index 0000000..ee2143f
+--- /dev/null
++++ b/app/quest/quest.css
+@@ -0,0 +1,120 @@
++@import "tailwindcss";
++
++@theme {
++  --color-void: #060912;
++  --color-deep: #0a1120;
++  --color-panel: #0d1628;
++  --color-line: #1d3157;
++  --color-glow: #4c9bff;
++  --color-ice: #d6e8ff;
++  --color-muted: #7f93b5;
++  --color-gold: #f0c75e;
++  --color-danger: #ff6b78;
++}
++
++/* inline: font di-resolve di elemen pemakai, tempat variabel next/font tersedia */
++@theme inline {
++  --font-pixel: var(--nf-pixel), ui-monospace, monospace;
++  --font-body: var(--nf-body), system-ui, sans-serif;
++}
++
++html,
++body {
++  margin: 0;
++  background: #060912;
++}
++
++.quest-root {
++  min-height: 100dvh;
++  color: #d6e8ff;
++  font-family: var(--nf-body), system-ui, sans-serif;
++  background-color: #060912;
++  /* Grid tipis ala layar status "System" */
++  background-image:
++    radial-gradient(ellipse 120% 60% at 50% -10%, rgb(76 155 255 / 0.16), transparent 60%),
++    linear-gradient(rgb(76 155 255 / 0.04) 1px, transparent 1px),
++    linear-gradient(90deg, rgb(76 155 255 / 0.04) 1px, transparent 1px);
++  background-size: auto, 24px 24px, 24px 24px;
++  padding: max(env(safe-area-inset-top), 12px) 14px max(env(safe-area-inset-bottom), 24px);
++  -webkit-tap-highlight-color: transparent;
++}
++
++/* Jendela JRPG: bingkai ganda, garis luar terang, garis dalam biru menyala */
++.win {
++  position: relative;
++  background: linear-gradient(180deg, rgb(13 22 40 / 0.96), rgb(8 14 28 / 0.96));
++  border: 2px solid rgb(214 232 255 / 0.78);
++  border-radius: 6px;
++  box-shadow:
++    inset 0 0 0 2px #060912,
++    inset 0 0 0 3px rgb(76 155 255 / 0.55),
++    0 0 18px rgb(76 155 255 / 0.18);
++}
++
++.win-quiet {
++  border-color: rgb(127 147 181 / 0.35);
++  box-shadow:
++    inset 0 0 0 2px #060912,
++    inset 0 0 0 3px rgb(29 49 87 / 0.8);
++}
++
++/* Kursor ▶ klasik: muncul di baris yang disentuh/difokus */
++.cursor {
++  opacity: 0;
++  transform: translateX(-4px);
++  transition: opacity 120ms, transform 120ms;
++}
++.row[data-active="true"] .cursor,
++.row:focus-visible .cursor,
++.row:has(:focus-visible) .cursor {
++  opacity: 1;
++  transform: none;
++  animation: blink 1s steps(2, start) infinite;
++}
++@media (hover: hover) {
++  .row:hover .cursor {
++    opacity: 1;
++    transform: none;
++    animation: blink 1s steps(2, start) infinite;
++  }
++}
++
++@keyframes blink {
++  to {
++    visibility: hidden;
++  }
++}
++
++.xp-seg {
++  background: rgb(29 49 87 / 0.7);
++}
++.xp-seg[data-on="true"] {
++  background: #f0c75e;
++  box-shadow: 0 0 6px rgb(240 199 94 / 0.55);
++}
++
++.sys-enter {
++  animation: sys-in 220ms ease-out;
++}
++@keyframes sys-in {
++  from {
++    opacity: 0;
++    transform: translateY(12px);
++  }
++}
++
++button:focus-visible,
++a:focus-visible {
++  outline: 2px solid #f0c75e;
++  outline-offset: 2px;
++}
++
++@media (prefers-reduced-motion: reduce) {
++  .row .cursor,
++  .row:hover .cursor {
++    animation: none !important;
++  }
++  .sys-enter {
++    animation: none;
++  }
++}
+diff --git a/lib/quest-bot.ts b/lib/quest-bot.ts
+new file mode 100644
+index 0000000..cce30b6
+--- /dev/null
++++ b/lib/quest-bot.ts
+@@ -0,0 +1,60 @@
++import { editable, type DaySummary, type StreakInfo } from "./quest-engine";
++import { prettyDate } from "./date";
++import { esc } from "./telegram";
++
++type Button = { text: string; callback_data?: string; web_app?: { url: string } };
++export type QuestMessage = { text: string; reply_markup?: { inline_keyboard: Button[][] } };
++
++/** URL Mini App. Pakai MINIAPP_URL kalau diisi, kalau tidak dari domain production Vercel. */
++export function miniAppUrl(): string | null {
++  if (process.env.MINIAPP_URL) return process.env.MINIAPP_URL;
++  const host = process.env.VERCEL_PROJECT_PRODUCTION_URL;
++  return host ? `https://${host}/quest` : null;
++}
++
++const ICON = { done: "✅", skipped: "⏭", todo: "▫️" } as const;
++
++export function questButtonData(date: string, id: string) {
++  return `q:${date}:${id}`;
++}
++
++export function renderQuests(day: DaySummary, streak: StreakInfo, header?: string): QuestMessage {
++  const lines = [header ?? `⚔️ <b>Daily Quest — ${prettyDate(day.date)}</b>`, ""];
++
++  if (!day.scheduled) {
++    lines.push("Nggak ada quest terjadwal hari ini.");
++  } else {
++    for (const q of day.quests) {
++      const target = q.target ? ` <i>(${esc(q.target)})</i>` : "";
++      const title = q.status === "todo" ? esc(q.title) : `<s>${esc(q.title)}</s>`;
++      lines.push(`${ICON[q.status]} ${title}${target} · ${q.stat} +${q.xp}`);
++    }
++    // Header khusus (pengingat malam) sudah menjelaskan status streak
++    if (!header) {
++      lines.push("");
++      const left = Math.max(0, day.target - day.done);
++      if (day.cleared) lines.push(`🔥 Hari ini aman · streak ${streak.streak} hari`);
++      else {
++        const prefix = streak.streak ? `🔥 Streak ${streak.streak} hari · s` : "🔥 S";
++        lines.push(`${prefix}elesaikan ${left} lagi untuk mengamankan hari ini`);
++      }
++      if (!day.cleared && streak.shieldLeft) lines.push("🛡 Perisai minggu ini masih ada");
++    }
++  }
++
++  const rows: Button[][] = [];
++  // Tombol ✓ hanya untuk tanggal yang masih bisa diubah (pesan lama tidak memunculkan tombol mati)
++  const pending = editable(day.date) ? day.quests.filter((q) => q.status === "todo") : [];
++  for (let i = 0; i < pending.length; i += 2) {
++    rows.push(
++      pending.slice(i, i + 2).map((q) => ({
++        text: `✓ ${q.title.length > 22 ? `${q.title.slice(0, 21)}…` : q.title}`,
++        callback_data: questButtonData(day.date, q.id),
++      }))
++    );
++  }
++  const url = miniAppUrl();
++  if (url) rows.push([{ text: "🗡 Buka Quest Log", web_app: { url } }]);
++
++  return { text: lines.join("\n"), reply_markup: rows.length ? { inline_keyboard: rows } : undefined };
++}
+diff --git a/lib/quest-engine.ts b/lib/quest-engine.ts
+new file mode 100644
+index 0000000..90e5a00
+--- /dev/null
++++ b/lib/quest-engine.ts
+@@ -0,0 +1,203 @@
++import { cmd, pipeline, toHash } from "./redis";
++import { STATS, clearTarget, questById, questsFor, type Quest, type Stat } from "./quests";
++import { addDays, todayWIB } from "./date";
++
++export type Status = "todo" | "done" | "skipped";
++
++const LOG = (ymd: string) => `quest:log:${ymd}`;
++const XP_KEY = "quest:xp";
++const SINCE_KEY = "quest:since";
++const STREAK_SCAN = 45; // hari yang dibaca per batch saat menghitung streak
++
++// ---------- Level & rank ----------
++
++/** XP untuk naik dari level L ke L+1 */
++export const xpToNext = (level: number) => 100 + 20 * (level - 1);
++
++export function levelInfo(totalXp: number) {
++  let level = 1;
++  let floor = 0;
++  while (totalXp >= floor + xpToNext(level)) {
++    floor += xpToNext(level);
++    level++;
++  }
++  return { level, intoLevel: totalXp - floor, needed: xpToNext(level) };
++}
++
++export function rankOf(level: number): string {
++  if (level >= 50) return "S";
++  if (level >= 35) return "A";
++  if (level >= 20) return "B";
++  if (level >= 10) return "C";
++  if (level >= 5) return "D";
++  return "E";
++}
++
++export const statLevel = (xp: number) => Math.floor(Math.max(0, xp) / 60) + 1;
++
++// ---------- Hari ----------
++
++export type DayQuest = Quest & { status: Status };
++
++export type DaySummary = {
++  date: string;
++  quests: DayQuest[];
++  done: number;
++  skipped: number;
++  scheduled: number;
++  target: number;
++  cleared: boolean;
++};
++
++function summarize(date: string, log: Record<string, string>): DaySummary {
++  const quests = questsFor(date).map((q) => ({
++    ...q,
++    status: (log[q.id] === "done" || log[q.id] === "skipped" ? log[q.id] : "todo") as Status,
++  }));
++  const done = quests.filter((q) => q.status === "done").length;
++  const skipped = quests.filter((q) => q.status === "skipped").length;
++  const target = clearTarget(quests.length);
++  return { date, quests, done, skipped, scheduled: quests.length, target, cleared: target > 0 && done >= target };
++}
++
++export async function getDay(date: string): Promise<DaySummary> {
++  return summarize(date, toHash(await cmd(["HGETALL", LOG(date)])));
++}
++
++/** Tanggal yang masih boleh diubah: hari ini dan kemarin (WIB) */
++export function editable(date: string, today = todayWIB()): boolean {
++  return date === today || date === addDays(today, -1);
++}
++
++export type MarkResult = { status: Status; xpDelta: number; levelUp: number | null; quest: Quest };
++
++/** Ubah status satu quest. Mengembalikan perubahan XP dan level baru kalau naik. */
++export async function setStatus(date: string, questId: string, status: Status): Promise<MarkResult> {
++  const quest = questById(questId);
++  if (!quest) throw new Error(`Quest "${questId}" tidak ada`);
++  if (!questsFor(date).some((q) => q.id === questId)) throw new Error("Quest ini tidak aktif di tanggal itu");
++  if (!editable(date)) throw new Error("Hanya hari ini dan kemarin yang bisa diubah");
++
++  const [prevRaw, xpRaw] = await pipeline([
++    ["HGET", LOG(date), questId],
++    ["HGET", XP_KEY, "total"],
++  ]);
++  const prev: Status = prevRaw === "done" || prevRaw === "skipped" ? prevRaw : "todo";
++  if (prev === status) return { status, xpDelta: 0, levelUp: null, quest };
++
++  const xpDelta = (status === "done" ? quest.xp : 0) - (prev === "done" ? quest.xp : 0);
++  const cmds: (string | number)[][] = [
++    status === "todo" ? ["HDEL", LOG(date), questId] : ["HSET", LOG(date), questId, status],
++    ["SETNX", SINCE_KEY, date],
++  ];
++  if (xpDelta) cmds.push(["HINCRBY", XP_KEY, "total", xpDelta], ["HINCRBY", XP_KEY, quest.stat, xpDelta]);
++  await pipeline(cmds);
++
++  // Kalau tanggal ini lebih awal dari "since" yang tersimpan (misal kemarin), mundurkan
++  const since = (await cmd(["GET", SINCE_KEY])) as string | null;
++  if (since && date < since) await cmd(["SET", SINCE_KEY, date]);
++
++  const before = levelInfo(Number(xpRaw ?? 0)).level;
++  const after = levelInfo(Math.max(0, Number(xpRaw ?? 0) + xpDelta)).level;
++  return { status, xpDelta, levelUp: after > before ? after : null, quest };
++}
++
++// ---------- Streak & perisai ----------
++
++/** Senin dari minggu tanggal itu, dipakai sebagai kunci jatah perisai */
++export function weekOf(ymd: string): string {
++  const dow = new Date(`${ymd}T00:00:00Z`).getUTCDay();
++  return addDays(ymd, -((dow + 6) % 7));
++}
++
++export type StreakInfo = { streak: number; shieldLeft: number; protectedDays: string[] };
++
++/**
++ * Streak = jumlah hari berturut-turut yang "clear" (≥ 60% quest selesai).
++ * Hari ini dihitung kalau sudah clear; kalau belum, tidak memutus streak.
++ * Satu hari gagal per minggu (Senin–Minggu) otomatis dilindungi perisai.
++ * Hari tanpa quest terjadwal dilewati tanpa menambah atau memutus streak.
++ *
++ * `bound` = tanggal tertua yang boleh ditelusuri (since, atau batas log yang sudah dibaca).
++ * `reachedBound` = penelusuran sampai `bound` tanpa putus, jadi mungkin masih berlanjut.
++ */
++export function computeStreak(
++  today: string,
++  bound: string | null,
++  logs: Map<string, Record<string, string>>
++): StreakInfo & { reachedBound: boolean } {
++  const shieldUsed = new Set<string>();
++  const protectedDays: string[] = [];
++  let streak = summarize(today, logs.get(today) ?? {}).cleared ? 1 : 0;
++  let reachedBound = true;
++
++  for (let d = addDays(today, -1); bound && d >= bound; d = addDays(d, -1)) {
++    const s = summarize(d, logs.get(d) ?? {});
++    if (s.scheduled === 0) continue;
++    if (s.cleared) {
++      streak++;
++      continue;
++    }
++    const wk = weekOf(d);
++    if (shieldUsed.has(wk)) {
++      reachedBound = false;
++      break;
++    }
++    shieldUsed.add(wk);
++    protectedDays.push(d);
++  }
++
++  return { streak, shieldLeft: shieldUsed.has(weekOf(today)) ? 0 : 1, protectedDays, reachedBound };
++}
++
++export async function getStreak(today = todayWIB()): Promise<StreakInfo> {
++  const since = (await cmd(["GET", SINCE_KEY])) as string | null;
++  const logs = new Map<string, Record<string, string>>();
++  let oldest = addDays(today, 1);
++
++  // Baca log per batch; berhenti kalau streak putus atau sudah sampai tanggal pertama pemakaian
++  for (;;) {
++    const dates: string[] = [];
++    for (let d = addDays(oldest, -1); since && d >= since && dates.length < STREAK_SCAN; d = addDays(d, -1)) {
++      dates.push(d);
++    }
++    if (!dates.length) {
++      const { streak, shieldLeft, protectedDays } = computeStreak(today, since, logs);
++      return { streak, shieldLeft, protectedDays };
++    }
++    const raw = await pipeline(dates.map((d) => ["HGETALL", LOG(d)]));
++    dates.forEach((d, i) => logs.set(d, toHash(raw[i])));
++    oldest = dates[dates.length - 1];
++
++    const r = computeStreak(today, oldest, logs);
++    if (!r.reachedBound || oldest === since) {
++      return { streak: r.streak, shieldLeft: r.shieldLeft, protectedDays: r.protectedDays };
++    }
++  }
++}
++
++// ---------- Profil ----------
++
++export type Profile = {
++  totalXp: number;
++  level: number;
++  rank: string;
++  intoLevel: number;
++  needed: number;
++  stats: { key: Stat; name: string; color: string; xp: number; level: number }[];
++};
++
++export async function getProfile(): Promise<Profile> {
++  const xp = toHash(await cmd(["HGETALL", XP_KEY]));
++  const totalXp = Math.max(0, Number(xp.total ?? 0));
++  const info = levelInfo(totalXp);
++  return {
++    totalXp,
++    ...info,
++    rank: rankOf(info.level),
++    stats: (Object.keys(STATS) as Stat[]).map((key) => {
++      const v = Number(xp[key] ?? 0);
++      return { key, name: STATS[key].name, color: STATS[key].color, xp: v, level: statLevel(v) };
++    }),
++  };
++}
+diff --git a/lib/quests.ts b/lib/quests.ts
+new file mode 100644
+index 0000000..b689be1
+--- /dev/null
++++ b/lib/quests.ts
+@@ -0,0 +1,48 @@
++/**
++ * DAFTAR DAILY QUEST — edit file ini untuk mengubah rutinitasmu.
++ *
++ * days: hari aktif, 0 = Minggu, 1 = Senin, ... 6 = Sabtu. Kosongkan (atau hapus) = setiap hari.
++ * xp:   hadiah saat selesai. Patokan: 10 ringan, 15 sedang, 25 berat.
++ * id:   huruf kecil tanpa spasi, maksimal 20 karakter. Jangan diganti setelah dipakai,
++ *       karena riwayat dan XP tersimpan berdasarkan id.
++ */
++
++export const STATS = {
++  STR: { name: "Strength", color: "#FF5C6C" },
++  AGI: { name: "Agility", color: "#FFB547" },
++  INT: { name: "Intelligence", color: "#A594FF" },
++  VIT: { name: "Vitality", color: "#3DDBB0" },
++  SEN: { name: "Sense", color: "#5CC8FF" },
++} as const;
++
++export type Stat = keyof typeof STATS;
++
++export type Quest = {
++  id: string;
++  title: string;
++  stat: Stat;
++  target?: string;
++  days?: number[];
++  xp: number;
++};
++
++export const QUESTS: Quest[] = [
++  { id: "sleep", title: "Tidur sebelum jam 23.00", stat: "VIT", xp: 15 },
++  { id: "water", title: "Minum air", target: "2 L", stat: "VIT", xp: 10 },
++  { id: "pushup", title: "Push-up", target: "20 rep", stat: "STR", xp: 15 },
++  { id: "cardio", title: "Jalan cepat atau lari", target: "30 menit", stat: "AGI", days: [1, 3, 5], xp: 20 },
++  { id: "sempro", title: "Kerjakan proposal sempro", target: "45 menit", stat: "INT", days: [1, 2, 3, 4, 5], xp: 25 },
++  { id: "nihongo", title: "Latihan bahasa Jepang", target: "20 menit", stat: "SEN", xp: 20 },
++];
++
++/** Hari aktif quest untuk tanggal YYYY-MM-DD */
++export function questsFor(ymd: string): Quest[] {
++  const dow = new Date(`${ymd}T00:00:00Z`).getUTCDay();
++  return QUESTS.filter((q) => !q.days?.length || q.days.includes(dow));
++}
++
++export const questById = (id: string) => QUESTS.find((q) => q.id === id);
++
++/** Porsi quest yang harus selesai supaya streak hari itu aman */
++export const CLEAR_RATIO = 0.6;
++export const clearTarget = (scheduled: number) => (scheduled ? Math.ceil(scheduled * CLEAR_RATIO) : 0);
+diff --git a/lib/redis.ts b/lib/redis.ts
+new file mode 100644
+index 0000000..6347a7d
+--- /dev/null
++++ b/lib/redis.ts
+@@ -0,0 +1,100 @@
++/**
++ * Klien Upstash Redis lewat REST (tanpa dependency).
++ * Env diisi otomatis oleh integrasi Upstash di Vercel Marketplace:
++ *   UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN, atau KV_REST_API_URL + KV_REST_API_TOKEN.
++ * Kalau env kosong dan bukan production, pakai memori lokal (untuk `npm run dev`).
++ */
++
++type Cmd = (string | number)[];
++
++const url = () => process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL || "";
++const token = () => process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN || "";
++
++export function redisConfigured(): boolean {
++  return Boolean(url() && token());
++}
++
++/** Jalankan beberapa perintah sekaligus. Hasil sesuai urutan perintah. */
++export async function pipeline(cmds: Cmd[]): Promise<unknown[]> {
++  if (!cmds.length) return [];
++  if (!redisConfigured()) {
++    if (process.env.NODE_ENV === "production") {
++      throw new Error("Redis belum disambungkan: isi UPSTASH_REDIS_REST_URL dan UPSTASH_REDIS_REST_TOKEN");
++    }
++    return cmds.map(memory);
++  }
++
++  const res = await fetch(`${url()}/pipeline`, {
++    method: "POST",
++    headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
++    body: JSON.stringify(cmds.map((c) => c.map(String))),
++    cache: "no-store",
++  });
++  if (!res.ok) throw new Error(`Redis ${res.status}: ${await res.text()}`);
++  const data = (await res.json()) as { result?: unknown; error?: string }[];
++  const failed = data.find((d) => d.error);
++  if (failed) throw new Error(`Redis: ${failed.error}`);
++  return data.map((d) => d.result);
++}
++
++export async function cmd(c: Cmd): Promise<unknown> {
++  return (await pipeline([c]))[0];
++}
++
++/** Ubah balasan HGETALL (array datar [k, v, k, v]) jadi object */
++export function toHash(raw: unknown): Record<string, string> {
++  const out: Record<string, string> = {};
++  if (Array.isArray(raw)) {
++    for (let i = 0; i + 1 < raw.length; i += 2) out[String(raw[i])] = String(raw[i + 1]);
++  } else if (raw && typeof raw === "object") {
++    for (const [k, v] of Object.entries(raw)) out[k] = String(v);
++  }
++  return out;
++}
++
++// ---------- Penyimpanan memori untuk dev lokal ----------
++const g = globalThis as unknown as { __questMem?: Map<string, string | Map<string, string>> };
++const mem = (g.__questMem ??= new Map());
++
++function hashOf(key: string): Map<string, string> {
++  let h = mem.get(key);
++  if (!(h instanceof Map)) {
++    h = new Map();
++    mem.set(key, h);
++  }
++  return h;
++}
++
++function memory(c: Cmd): unknown {
++  const [op, key, ...a] = c.map(String);
++  switch (op.toUpperCase()) {
++    case "GET": {
++      const v = mem.get(key);
++      return typeof v === "string" ? v : null;
++    }
++    case "SET":
++      mem.set(key, a[0]);
++      return "OK";
++    case "SETNX":
++      if (mem.has(key)) return 0;
++      mem.set(key, a[0]);
++      return 1;
++    case "HGETALL":
++      return [...hashOf(key).entries()].flat();
++    case "HGET":
++      return hashOf(key).get(a[0]) ?? null;
++    case "HSET":
++      for (let i = 0; i + 1 < a.length; i += 2) hashOf(key).set(a[i], a[i + 1]);
++      return 1;
++    case "HDEL":
++      return a.filter((f) => hashOf(key).delete(f)).length;
++    case "HINCRBY": {
++      const h = hashOf(key);
++      const n = Number(h.get(a[0]) ?? 0) + Number(a[1]);
++      h.set(a[0], String(n));
++      return n;
++    }
++    default:
++      throw new Error(`Perintah ${op} belum didukung di memori lokal`);
++  }
++}
+diff --git a/lib/telegram-auth.ts b/lib/telegram-auth.ts
+new file mode 100644
+index 0000000..7bc1471
+--- /dev/null
++++ b/lib/telegram-auth.ts
+@@ -0,0 +1,58 @@
++import { createHmac, timingSafeEqual } from "node:crypto";
++
++const MAX_AGE_S = 7 * 24 * 3600;
++
++/**
++ * Cek tanda tangan initData dari Telegram Mini App.
++ * https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
++ * Mengembalikan user id kalau valid, null kalau tidak.
++ */
++export function verifyInitData(initData: string, botToken: string, nowS = Date.now() / 1000): number | null {
++  if (!initData || !botToken) return null;
++  const params = new URLSearchParams(initData);
++  const hash = params.get("hash");
++  if (!hash) return null;
++  params.delete("hash");
++
++  const checkString = [...params.entries()]
++    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
++    .map(([k, v]) => `${k}=${v}`)
++    .join("\n");
++  const secret = createHmac("sha256", "WebAppData").update(botToken).digest();
++  const expected = createHmac("sha256", secret).update(checkString).digest();
++
++  const given = Buffer.from(hash, "hex");
++  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null;
++
++  const authDate = Number(params.get("auth_date"));
++  if (!authDate || nowS - authDate > MAX_AGE_S) return null;
++
++  try {
++    const user = JSON.parse(params.get("user") ?? "null") as { id?: number } | null;
++    return typeof user?.id === "number" ? user.id : null;
++  } catch {
++    return null;
++  }
++}
++
++/**
++ * Izinkan request ke API quest kalau:
++ * - initData Telegram valid dan milik TELEGRAM_ALLOWED_CHAT_ID, atau
++ * - header x-quest-key sama dengan QUEST_WEB_KEY (untuk buka dari browser biasa), atau
++ * - sedang dev lokal tanpa TELEGRAM_BOT_TOKEN.
++ */
++export function isOwnerRequest(headers: Headers): boolean {
++  const token = process.env.TELEGRAM_BOT_TOKEN ?? "";
++  const allowed = process.env.TELEGRAM_ALLOWED_CHAT_ID ?? "";
++
++  const userId = verifyInitData(headers.get("x-tg-init-data") ?? "", token);
++  if (userId !== null && allowed && String(userId) === allowed) return true;
++
++  const webKey = process.env.QUEST_WEB_KEY ?? "";
++  const givenKey = headers.get("x-quest-key") ?? "";
++  if (webKey.length >= 16 && givenKey.length === webKey.length) {
++    if (timingSafeEqual(Buffer.from(givenKey), Buffer.from(webKey))) return true;
++  }
++
++  return process.env.NODE_ENV !== "production" && !token;
++}
+diff --git a/package-lock.json b/package-lock.json
+index e1f4046..5319274 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -11,11 +11,27 @@
+         "react-dom": "^19"
+       },
+       "devDependencies": {
++        "@tailwindcss/postcss": "^4.3.3",
+         "@types/node": "^22",
+         "@types/react": "^19",
++        "postcss": "^8.5.31",
++        "tailwindcss": "^4.3.3",
+         "typescript": "^5"
+       }
+     },
++    "node_modules/@alloc/quick-lru": {
++      "version": "5.3.0",
++      "resolved": "https://registry.npmjs.org/@alloc/quick-lru/-/quick-lru-5.3.0.tgz",
++      "integrity": "sha512-U4+70Pc5ZS9osnCBCE5Jha/ciHM+Yp+CNMNC/7HvYbNRk1Ldd+f7qO65W5qfhu/TCv+/ozljlXXe9Nj8419DMA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=10"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/sindresorhus"
++      }
++    },
+     "node_modules/@emnapi/runtime": {
+       "version": "1.11.3",
+       "resolved": "https://registry.npmjs.org/@emnapi/runtime/-/runtime-1.11.3.tgz",
+@@ -527,6 +543,56 @@
+         "url": "https://opencollective.com/libvips"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@next/env": {
+       "version": "15.5.27",
+       "resolved": "https://registry.npmjs.org/@next/env/-/env-15.5.27.tgz",
+@@ -670,6 +736,277 @@
+         "tslib": "^2.8.0"
+       }
+     },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.3",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.3.tgz",
++      "integrity": "sha512-/T8IKEsf9VTU6tLjgC7+sv2mOPtQxzE2jMw7u4Tt40Tx+QSZxpzh95/H6cMKoja9XuW7iMdLJYBB0o9G1CaAgg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.1",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.32.0",
++        "magic-string": "^0.30.21",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.3",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.3.tgz",
++      "integrity": "sha512-krXjAikiaFSPaK/FkAQT5UTx3VormQaiZ5hBFlJZ9UFQGB/rwg1MZIhHAG9smMQRTdyJxP6Qt5MwMtdyU5FWrA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.3",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.3",
++        "@tailwindcss/oxide-darwin-x64": "4.3.3",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.3",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.3",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.3",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.3",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.3",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.3",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.3",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.3",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.3",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.3.tgz",
++      "integrity": "sha512-Y85A2gmPSkl5Ve5qR86GL4HT509cFqQh1aes9p3sSkyTPwt0Pppf3GkwGe4JPACcRYjgJIEhQgM6dBClnr0NYw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.3",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.3.tgz",
++      "integrity": "sha512-BiaWatpBcERQFDlOjRDpIVXuFK5PJez5SA4JMg6VYZdBYU+qKfV/vqjcIs+IYmtitf1xYQZTwXvU/8y4lfZUGw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.3",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.3.tgz",
++      "integrity": "sha512-fAeUqfV5ndhxRwai8cXGzdLvul9utWOmeTkv69unv4ZXixjn61Z+p9lCWdwOwA3TYboG3BwdVuN/RDjhBRl0mw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.3",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.3.tgz",
++      "integrity": "sha512-iyf5bV6+wnAlflVeEy7R25dupxTNECZN5QMI0qNT6eT+EgaGdZcKhGkr5SdoaWiLJ3spLqIY9VCeSGrwmtg4kw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.3",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.3.tgz",
++      "integrity": "sha512-aAYUprJAJQWWbRrPvtjdroZ56Md+JM8pMiopS6xGEwDfLhqj+2ver2p4nU4Mb3CRqcMmNBjo8KkUgcxhkzVQGQ==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.3",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.3.tgz",
++      "integrity": "sha512-nDxldcEENOxZRzC2uu9jrutZdAAQtb+8WWDCSnWL1zvBk1+FN+x6MtDViPB5AJMfttVCUhehGWus3XBPgatM/w==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.3",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.3.tgz",
++      "integrity": "sha512-Md44bD6veX/PC5iyF8cDVnw4HBIANZepRZZ7a8DQOvkfo5WUBwcp6iAuCUz23u+4SUkhJlD3eL7hNdW8ezd/kA==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.3",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.3.tgz",
++      "integrity": "sha512-tx7us1muwOKAKWao2v/GaafFeQboE6aj88vC6ziN2NCGcRm8gWUhwjzg+YdVB1e4boAtdtma4L43onunI6NS4w==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.3",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.3.tgz",
++      "integrity": "sha512-SJxX60smvHgasZoBy11dX6YRjXJFovwWBoedhbQPOBzgFWBHGB+TVPWB9BxzR7TTxU8FQZAI2AyiNCMzFm8Img==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.3",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.3.tgz",
++      "integrity": "sha512-jx1+rPhY/5Ympkktd656HBWEBLxP7dH06losBLjjf5vgCODXvi9KhtftWcMIwTFIDqBr7cRnQkdLnAG+IOlGvQ==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "cpu": [
++        "wasm32"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.1",
++        "@emnapi/runtime": "^1.11.1",
++        "@emnapi/wasi-threads": "^1.2.2",
++        "@napi-rs/wasm-runtime": "^1.1.4",
++        "@tybys/wasm-util": "^0.10.2",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": ">=14.0.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.3",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.3.tgz",
++      "integrity": "sha512-3rc292Ca2ceK6Ulcc/bAVnTs/3nDtoPhyEKlgPv+yQJQi/JS/AMJlqzxvlDacL1nekbrcf6bTqp/jV4qgnPxNQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.3",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.3.tgz",
++      "integrity": "sha512-yJ0pwIVc/nYeGoV02WtsN8KYyLQv7kyI2wDnkezyJlGGjkd4QLwDGAwl47YpPJeuI0M0ObaXGSPjvWDPeTPggw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/postcss": {
++      "version": "4.3.3",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/postcss/-/postcss-4.3.3.tgz",
++      "integrity": "sha512-JTSZZGQi1AyKirbLN3azmjVzef92tcX7h+iSqPdaeStyFpGpDlKvvpxeOE8njhbUanbRwr3z8DyzhICWnMtQeg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@alloc/quick-lru": "^5.2.0",
++        "@tailwindcss/node": "4.3.3",
++        "@tailwindcss/oxide": "4.3.3",
++        "postcss": "^8.5.16",
++        "tailwindcss": "4.3.3"
++      }
++    },
+     "node_modules/@types/node": {
+       "version": "22.20.5",
+       "resolved": "https://registry.npmjs.org/@types/node/-/node-22.20.5.tgz",
+@@ -727,12 +1064,314 @@
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+       "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
++      "devOptional": true,
+       "license": "Apache-2.0",
+-      "optional": true,
+       "engines": {
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.0",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.0.tgz",
++      "integrity": "sha512-9vhedylFonb2YGogzUKX6+Ja72gOJbN1QHAqdrvqLwhdl/QWbKopzoUC9EbQNVsAns/bx/4uyqalrQAoy1IByw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
++    "node_modules/lightningcss": {
++      "version": "1.32.0",
++      "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.32.0.tgz",
++      "integrity": "sha512-NXYBzinNrblfraPGyrbPoD19C1h9lfI/1mzgWYvXUTe414Gz/X1FD2XBZSZM7rRTrMA8JL3OtAaGifrIKhQ5yQ==",
++      "dev": true,
++      "license": "MPL-2.0",
++      "dependencies": {
++        "detect-libc": "^2.0.3"
++      },
++      "engines": {
++        "node": ">= 12.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/parcel"
++      },
++      "optionalDependencies": {
++        "lightningcss-android-arm64": "1.32.0",
++        "lightningcss-darwin-arm64": "1.32.0",
++        "lightningcss-darwin-x64": "1.32.0",
++        "lightningcss-freebsd-x64": "1.32.0",
++        "lightningcss-linux-arm-gnueabihf": "1.32.0",
++        "lightningcss-linux-arm64-gnu": "1.32.0",
++        "lightningcss-linux-arm64-musl": "1.32.0",
++        "lightningcss-linux-x64-gnu": "1.32.0",
++        "lightningcss-linux-x64-musl": "1.32.0",
++        "lightningcss-win32-arm64-msvc": "1.32.0",
++        "lightningcss-win32-x64-msvc": "1.32.0"
++      }
++    },
++    "node_modules/lightningcss-android-arm64": {
++      "version": "1.32.0",
++      "resolved": "https://registry.npmjs.org/lightningcss-android-arm64/-/lightningcss-android-arm64-1.32.0.tgz",
++      "integrity": "sha512-YK7/ClTt4kAK0vo6w3X+Pnm0D2cf2vPHbhOXdoNti1Ga0al1P4TBZhwjATvjNwLEBCnKvjJc2jQgHXH0NEwlAg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MPL-2.0",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 12.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/parcel"
++      }
++    },
++    "node_modules/lightningcss-darwin-arm64": {
++      "version": "1.32.0",
++      "resolved": "https://registry.npmjs.org/lightningcss-darwin-arm64/-/lightningcss-darwin-arm64-1.32.0.tgz",
++      "integrity": "sha512-RzeG9Ju5bag2Bv1/lwlVJvBE3q6TtXskdZLLCyfg5pt+HLz9BqlICO7LZM7VHNTTn/5PRhHFBSjk5lc4cmscPQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MPL-2.0",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 12.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/parcel"
++      }
++    },
++    "node_modules/lightningcss-darwin-x64": {
++      "version": "1.32.0",
++      "resolved": "https://registry.npmjs.org/lightningcss-darwin-x64/-/lightningcss-darwin-x64-1.32.0.tgz",
++      "integrity": "sha512-U+QsBp2m/s2wqpUYT/6wnlagdZbtZdndSmut/NJqlCcMLTWp5muCrID+K5UJ6jqD2BFshejCYXniPDbNh73V8w==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MPL-2.0",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 12.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/parcel"
++      }
++    },
++    "node_modules/lightningcss-freebsd-x64": {
++      "version": "1.32.0",
++      "resolved": "https://registry.npmjs.org/lightningcss-freebsd-x64/-/lightningcss-freebsd-x64-1.32.0.tgz",
++      "integrity": "sha512-JCTigedEksZk3tHTTthnMdVfGf61Fky8Ji2E4YjUTEQX14xiy/lTzXnu1vwiZe3bYe0q+SpsSH/CTeDXK6WHig==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MPL-2.0",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 12.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/parcel"
++      }
++    },
++    "node_modules/lightningcss-linux-arm-gnueabihf": {
++      "version": "1.32.0",
++      "resolved": "https://registry.npmjs.org/lightningcss-linux-arm-gnueabihf/-/lightningcss-linux-arm-gnueabihf-1.32.0.tgz",
++      "integrity": "sha512-x6rnnpRa2GL0zQOkt6rts3YDPzduLpWvwAF6EMhXFVZXD4tPrBkEFqzGowzCsIWsPjqSK+tyNEODUBXeeVHSkw==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MPL-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 12.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/parcel"
++      }
++    },
++    "node_modules/lightningcss-linux-arm64-gnu": {
++      "version": "1.32.0",
++      "resolved": "https://registry.npmjs.org/lightningcss-linux-arm64-gnu/-/lightningcss-linux-arm64-gnu-1.32.0.tgz",
++      "integrity": "sha512-0nnMyoyOLRJXfbMOilaSRcLH3Jw5z9HDNGfT/gwCPgaDjnx0i8w7vBzFLFR1f6CMLKF8gVbebmkUN3fa/kQJpQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MPL-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 12.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/parcel"
++      }
++    },
++    "node_modules/lightningcss-linux-arm64-musl": {
++      "version": "1.32.0",
++      "resolved": "https://registry.npmjs.org/lightningcss-linux-arm64-musl/-/lightningcss-linux-arm64-musl-1.32.0.tgz",
++      "integrity": "sha512-UpQkoenr4UJEzgVIYpI80lDFvRmPVg6oqboNHfoH4CQIfNA+HOrZ7Mo7KZP02dC6LjghPQJeBsvXhJod/wnIBg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MPL-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 12.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/parcel"
++      }
++    },
++    "node_modules/lightningcss-linux-x64-gnu": {
++      "version": "1.32.0",
++      "resolved": "https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.32.0.tgz",
++      "integrity": "sha512-V7Qr52IhZmdKPVr+Vtw8o+WLsQJYCTd8loIfpDaMRWGUZfBOYEJeyJIkqGIDMZPwPx24pUMfwSxxI8phr/MbOA==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MPL-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 12.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/parcel"
++      }
++    },
++    "node_modules/lightningcss-linux-x64-musl": {
++      "version": "1.32.0",
++      "resolved": "https://registry.npmjs.org/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.32.0.tgz",
++      "integrity": "sha512-bYcLp+Vb0awsiXg/80uCRezCYHNg1/l3mt0gzHnWV9XP1W5sKa5/TCdGWaR/zBM2PeF/HbsQv/j2URNOiVuxWg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MPL-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 12.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/parcel"
++      }
++    },
++    "node_modules/lightningcss-win32-arm64-msvc": {
++      "version": "1.32.0",
++      "resolved": "https://registry.npmjs.org/lightningcss-win32-arm64-msvc/-/lightningcss-win32-arm64-msvc-1.32.0.tgz",
++      "integrity": "sha512-8SbC8BR40pS6baCM8sbtYDSwEVQd4JlFTOlaD3gWGHfThTcABnNDBda6eTZeqbofalIJhFx0qKzgHJmcPTnGdw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MPL-2.0",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 12.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/parcel"
++      }
++    },
++    "node_modules/lightningcss-win32-x64-msvc": {
++      "version": "1.32.0",
++      "resolved": "https://registry.npmjs.org/lightningcss-win32-x64-msvc/-/lightningcss-win32-x64-msvc-1.32.0.tgz",
++      "integrity": "sha512-Amq9B/SoZYdDi1kFrojnoqPLxYhQ4Wo5XiL8EVJrVsB8ARoC1PWW6VGtT0WKCemjy8aC+louJnjS7U18x3b06Q==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MPL-2.0",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 12.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/parcel"
++      }
++    },
++    "node_modules/magic-string": {
++      "version": "0.30.21",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-0.30.21.tgz",
++      "integrity": "sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.5"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -803,6 +1442,34 @@
+         }
+       }
+     },
++    "node_modules/next/node_modules/postcss": {
++      "version": "8.4.31",
++      "resolved": "https://registry.npmjs.org/postcss/-/postcss-8.4.31.tgz",
++      "integrity": "sha512-PS08Iboia9mts/2ygV3eLpY5ghnUcfLV/EXTOW1E2qYxJKGGBUtNjN76FYHnMs36RmARn41bC0AZmn+rR0OVpQ==",
++      "funding": [
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/postcss/"
++        },
++        {
++          "type": "tidelift",
++          "url": "https://tidelift.com/funding/github/npm/postcss"
++        },
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/ai"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "nanoid": "^3.3.6",
++        "picocolors": "^1.0.0",
++        "source-map-js": "^1.0.2"
++      },
++      "engines": {
++        "node": "^10 || ^12 || >=14"
++      }
++    },
+     "node_modules/picocolors": {
+       "version": "1.1.1",
+       "resolved": "https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz",
+@@ -810,9 +1477,10 @@
+       "license": "ISC"
+     },
+     "node_modules/postcss": {
+-      "version": "8.4.31",
+-      "resolved": "https://registry.npmjs.org/postcss/-/postcss-8.4.31.tgz",
+-      "integrity": "sha512-PS08Iboia9mts/2ygV3eLpY5ghnUcfLV/EXTOW1E2qYxJKGGBUtNjN76FYHnMs36RmARn41bC0AZmn+rR0OVpQ==",
++      "version": "8.5.31",
++      "resolved": "https://registry.npmjs.org/postcss/-/postcss-8.5.31.tgz",
++      "integrity": "sha512-YUbWYCgErwnMAVkjUnYa+KlMBzGpHwiIt/DE7f0G33AuX2LH9UcTk6KgWxd3zRU+pN3u/C+Xl3EnMLM4Hea7Sg==",
++      "dev": true,
+       "funding": [
+         {
+           "type": "opencollective",
+@@ -829,9 +1497,9 @@
+       ],
+       "license": "MIT",
+       "dependencies": {
+-        "nanoid": "^3.3.6",
+-        "picocolors": "^1.0.0",
+-        "source-map-js": "^1.0.2"
++        "nanoid": "^3.3.20",
++        "picocolors": "^1.1.1",
++        "source-map-js": "^1.2.2"
+       },
+       "engines": {
+         "node": "^10 || ^12 || >=14"
+@@ -959,6 +1627,27 @@
+         }
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.3",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.3.tgz",
++      "integrity": "sha512-gOhV3P7ufE62QDGg1zVaTgCR+EtPv92k2nIhVcVKcLmxT1sUBsQGhnZj175j+MqRt4zLF7ic+sCYjfhxMxj7YQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tslib": {
+       "version": "2.8.1",
+       "resolved": "https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz",
+diff --git a/package.json b/package.json
+index 97c4bc9..a649371 100644
+--- a/package.json
++++ b/package.json
+@@ -13,8 +13,11 @@
+     "react-dom": "^19"
+   },
+   "devDependencies": {
++    "@tailwindcss/postcss": "^4.3.3",
+     "@types/node": "^22",
+     "@types/react": "^19",
++    "postcss": "^8.5.31",
++    "tailwindcss": "^4.3.3",
+     "typescript": "^5"
+   }
+ }
+diff --git a/postcss.config.mjs b/postcss.config.mjs
+new file mode 100644
+index 0000000..a2dc18a
+--- /dev/null
++++ b/postcss.config.mjs
+@@ -0,0 +1,3 @@
++export default {
++  plugins: { "@tailwindcss/postcss": {} },
++};
+diff --git a/vercel.json b/vercel.json
+index 0fd015d..112f703 100644
+--- a/vercel.json
++++ b/vercel.json
+@@ -1,3 +1,6 @@
+ {
+-  "crons": [{ "path": "/api/cron/daily", "schedule": "0 0 * * *" }]
++  "crons": [
++    { "path": "/api/cron/daily", "schedule": "0 0 * * *" },
++    { "path": "/api/cron/evening", "schedule": "0 13 * * *" }
++  ]
+ }
+-- 
+2.43.0
+
